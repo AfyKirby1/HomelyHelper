@@ -1,5 +1,14 @@
-# main.py – Homely Helper v0.4.2
+# main.py – Homely Helper v0.4.3
 """A furniture-layout planner with advanced interaction and visual features.
+
+Changes in v0.4.3
+─────────────────
+1. Fixed doors and windows not saving/loading in JSON files
+2. Added rotation support for doors and windows (right-click > Rotate 90°)
+3. Improved door/window position tracking and persistence
+4. Added Grid Snap System - snap furniture to invisible grid for perfect alignment
+5. Added "Show grid lines" option to visualize the snap grid
+6. Enhanced door opening arc rotation to follow door orientation
 
 Changes in v0.4.2
 ─────────────────
@@ -169,6 +178,7 @@ class DoorWindow:
     thickness_m: float
     x_m: float = field(default=0.0)
     y_m: float = field(default=0.0)
+    rotation: float = field(default=0.0)  # rotation in degrees
     is_door: bool = field(default=True)
 
 class DoorItem(QGraphicsRectItem):
@@ -189,8 +199,12 @@ class DoorItem(QGraphicsRectItem):
         self.setFlags(
             QGraphicsItem.GraphicsItemFlag.ItemIsMovable
             | QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
+            | QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges
         )
         self.setAcceptHoverEvents(True)
+        
+        # Set initial rotation
+        self.setRotation(door_window.rotation)
     
     def mouseDoubleClickEvent(self, event):
         """Toggle door open/closed on double-click."""
@@ -273,8 +287,17 @@ class DoorItem(QGraphicsRectItem):
     
     def rotate_90(self):
         """Rotate the door/window by 90 degrees."""
-        current_rotation = self.rotation()
-        self.setRotation(current_rotation + 90)
+        self.door_window.rotation = (self.door_window.rotation + 90) % 360
+        self.setRotation(self.door_window.rotation)
+        
+        # Update the opening arc position if door is open
+        if self.is_open and self.opening_arc:
+            self.opening_arc.setRotation(self.door_window.rotation)
+        
+        # Update position tracking
+        pos_px = self.pos()
+        self.door_window.x_m = pos_px.x() / self.scale
+        self.door_window.y_m = pos_px.y() / self.scale
     
     def delete_self(self):
         """Delete this door/window item."""
@@ -291,6 +314,27 @@ class DoorItem(QGraphicsRectItem):
         
         if self.scene():
             self.scene().removeItem(self)
+    
+    def itemChange(self, change, value):
+        """Track position changes for doors/windows."""
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange:
+            new_pos = value
+            
+            # Apply grid snapping if enabled
+            if self.parent_planner.grid_snap_enabled:
+                new_pos = self.parent_planner.snap_to_grid(new_pos)
+            
+            return new_pos
+        elif change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
+            pos_px = self.pos()
+            self.door_window.x_m = pos_px.x() / self.scale
+            self.door_window.y_m = pos_px.y() / self.scale
+            
+            # Update opening arc position if it exists
+            if self.opening_arc:
+                self.opening_arc.setPos(self.pos())
+                
+        return super().itemChange(change, value)
 
 class FurnitureItem(QGraphicsRectItem):
     """Draggable rectangle with enhanced visual styling, delete button, and rotation."""
@@ -559,9 +603,14 @@ class FurnitureItem(QGraphicsRectItem):
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange:
+            new_pos = value
+            
+            # Apply grid snapping first
+            if self.parent_planner.grid_snap_enabled:
+                new_pos = self.parent_planner.snap_to_grid(new_pos)
+            
             # Handle border collision if enabled
             if self.parent_planner.snap_to_borders:
-                new_pos = value
                 room_width_px = self.parent_planner.room_width_m * self.scale
                 room_height_px = self.parent_planner.room_depth_m * self.scale
                 
@@ -574,6 +623,8 @@ class FurnitureItem(QGraphicsRectItem):
                 y = max(0, min(new_pos.y(), room_height_px - furniture_height))
                 
                 return QPointF(x, y)
+            
+            return new_pos
         elif change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             pos_px: QPointF = self.pos()
             self.furn.x_m = pos_px.x() / self.scale
@@ -909,6 +960,9 @@ class RoomPlanner(QMainWindow):
         self.furniture_items = []  # Track furniture items for deletion
         self.door_items = []  # Track door items
         self.snap_to_borders = False  # Border collision toggle
+        self.grid_snap_enabled = False  # Whether to snap to grid
+        self.grid_size_m = 0.5  # Grid size in meters (50cm default)
+        self.show_grid = False  # Whether to show grid lines
         self.door_counter = 1  # Counter for door naming
         self.window_counter = 1  # Counter for window naming
         
@@ -1101,6 +1155,17 @@ class RoomPlanner(QMainWindow):
         self.snap_checkbox.setChecked(False)
         self.snap_checkbox.toggled.connect(self.toggle_snap_to_borders)
         room_layout.addRow(self.snap_checkbox)
+        
+        # Grid snap controls
+        self.grid_checkbox = QCheckBox("Enable grid snap")
+        self.grid_checkbox.setChecked(False)
+        self.grid_checkbox.toggled.connect(self.toggle_grid_snap)
+        room_layout.addRow(self.grid_checkbox)
+        
+        self.show_grid_checkbox = QCheckBox("Show grid lines")
+        self.show_grid_checkbox.setChecked(False)
+        self.show_grid_checkbox.toggled.connect(self.toggle_show_grid)
+        room_layout.addRow(self.show_grid_checkbox)
         
         # Floor texture
         floor_group = QGroupBox("Floor Texture")
@@ -1470,7 +1535,8 @@ class RoomPlanner(QMainWindow):
                 'floor_texture': self.current_floor_texture,
                 'show_border': self.show_room_border
             },
-            'furniture': []
+            'furniture': [],
+            'doors_windows': []
         }
         
         # Add furniture data
@@ -1484,6 +1550,19 @@ class RoomPlanner(QMainWindow):
                 'x_m': furn.x_m,
                 'y_m': furn.y_m,
                 'rotation': furn.rotation
+            })
+        
+        # Add doors and windows data
+        for item in self.door_items:
+            door_window = item.door_window
+            layout_data['doors_windows'].append({
+                'name': door_window.name,
+                'width_m': door_window.width_m,
+                'thickness_m': door_window.thickness_m,
+                'x_m': door_window.x_m,
+                'y_m': door_window.y_m,
+                'rotation': door_window.rotation,
+                'is_door': door_window.is_door
             })
         
         # Save to file
@@ -1554,6 +1633,29 @@ class RoomPlanner(QMainWindow):
                 lw_item = QListWidgetItem(list_text)
                 lw_item.setData(Qt.ItemDataRole.UserRole, furn)
                 self.list_widget.addItem(lw_item)
+            
+            # Load doors and windows
+            for door_data in layout_data.get('doors_windows', []):
+                door_window = DoorWindow(
+                    name=door_data['name'],
+                    width_m=door_data['width_m'],
+                    thickness_m=door_data['thickness_m'],
+                    x_m=door_data['x_m'],
+                    y_m=door_data['y_m'],
+                    rotation=door_data.get('rotation', 0.0),
+                    is_door=door_data['is_door']
+                )
+                
+                # Create door/window item
+                door_item = DoorItem(door_window, self.pixels_per_m, self)
+                door_item.setPos(door_window.x_m * self.pixels_per_m, door_window.y_m * self.pixels_per_m)
+                door_item.setRotation(door_window.rotation)
+                
+                self.scene.addItem(door_item)
+                self.door_items.append(door_item)
+                
+                # Add to list
+                self._add_door_to_list(door_window)
             
             QMessageBox.information(self, "Success", f"Layout loaded from {filename}")
             
@@ -1696,6 +1798,25 @@ class RoomPlanner(QMainWindow):
         """Toggle furniture snapping to room borders."""
         self.snap_to_borders = self.snap_checkbox.isChecked()
     
+    def toggle_grid_snap(self):
+        """Toggle grid snapping for furniture."""
+        self.grid_snap_enabled = self.grid_checkbox.isChecked()
+    
+    def toggle_show_grid(self):
+        """Toggle grid line visibility."""
+        self.show_grid = self.show_grid_checkbox.isChecked()
+        self.draw_room_border()  # Redraw to show/hide grid
+    
+    def snap_to_grid(self, pos):
+        """Snap a position to the nearest grid point."""
+        if not self.grid_snap_enabled:
+            return pos
+            
+        grid_size_px = self.grid_size_m * self.pixels_per_m
+        snapped_x = round(pos.x() / grid_size_px) * grid_size_px
+        snapped_y = round(pos.y() / grid_size_px) * grid_size_px
+        return QPointF(snapped_x, snapped_y)
+    
     def show_homely_help(self):
         """Show Homely Help dialog (placeholder)."""
         QMessageBox.information(
@@ -1749,6 +1870,45 @@ class RoomPlanner(QMainWindow):
             self._room_rect_item.setPen(pen)
             
         self._room_rect_item.setBrush(QBrush())  # No fill
+        
+        # Draw grid lines if enabled
+        self._draw_grid_lines()
+    
+    def _draw_grid_lines(self):
+        """Draw grid lines on the canvas if show_grid is enabled."""
+        # Remove existing grid lines
+        if hasattr(self, '_grid_lines'):
+            for line in self._grid_lines:
+                if line.scene():
+                    self.scene.removeItem(line)
+        
+        self._grid_lines = []
+        
+        if not self.show_grid:
+            return
+            
+        px_w = self.room_width_m * self.pixels_per_m
+        px_d = self.room_depth_m * self.pixels_per_m
+        grid_size_px = self.grid_size_m * self.pixels_per_m
+        
+        # Grid line style
+        pen = QPen(QColor(200, 200, 200, 100), 1, Qt.PenStyle.DotLine)
+        
+        # Vertical lines
+        x = grid_size_px
+        while x < px_w:
+            line = self.scene.addLine(x, 0, x, px_d, pen)
+            line.setZValue(-1)  # Behind everything else
+            self._grid_lines.append(line)
+            x += grid_size_px
+        
+        # Horizontal lines
+        y = grid_size_px
+        while y < px_d:
+            line = self.scene.addLine(0, y, px_w, y, pen)
+            line.setZValue(-1)  # Behind everything else
+            self._grid_lines.append(line)
+            y += grid_size_px
     
     # ──────────────────────────────────────────────────────────
     # Menu actions
