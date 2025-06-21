@@ -3,7 +3,7 @@
 A modern Windows desktop app for planning furniture layouts with professional UI theming, door/window placement, and enhanced stability.
 
 ---
-## ✨ Current Features (v0.4.1)
+## ✨ Current Features (v0.4.2)
 - **Professional Menu System** – File, View, Settings, Help menus with shortcuts
 - **Theme System** – Light, Dark, and Mixed color schemes
 - **Scalable Interface** – Font size adjustment for large monitors
@@ -80,7 +80,12 @@ python main.py
 - `Delete` – Delete selected items
 
 ---
-## 🐛 Recent Bug Fixes (v0.4.1)
+## 🐛 Recent Bug Fixes (v0.4.2)
+- ✅ **Button Reappearance** – Fixed issue where X and rotate buttons wouldn't show when reselecting furniture
+- ✅ **Selection State Handling** – Improved logic for showing/hiding buttons based on selection changes
+- ✅ **Button Cleanup** – Fixed hanging X and refresh buttons that stayed visible after moving furniture
+- ✅ **Improved Button Management** – Better cleanup of control buttons when furniture is moved or deleted
+- ✅ **Memory Management** – Enhanced widget cleanup to prevent button artifacts
 - ✅ **Removed Canvas Context Menu** – Fixed buggy right-click behavior on canvas
 - ✅ **Enhanced Zoom Buttons** – Clearer 🔍+/🔍− symbols instead of basic +/-
 - ✅ **Door Opening Visualization** – Realistic quarter-circle arcs show door swing

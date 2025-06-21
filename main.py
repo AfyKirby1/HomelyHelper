@@ -1,5 +1,15 @@
-# main.py – Homely Helper v0.4
+# main.py – Homely Helper v0.4.2
 """A furniture-layout planner with advanced interaction and visual features.
+
+Changes in v0.4.2
+─────────────────
+1. Fixed button reappearance issue when reselecting furniture items
+2. Improved selection state handling for control buttons
+3. Fixed hanging control buttons (X and rotate) that stayed visible after moving furniture
+4. Improved button widget management with proper cleanup and error handling
+5. Enhanced memory management to prevent button artifacts
+6. Added safety checks to prevent crashes when buttons are deleted
+7. Resolved RuntimeError issues with QPushButton widget deletion
 
 Changes in v0.4
 ────────────────
@@ -360,28 +370,41 @@ class FurnitureItem(QGraphicsRectItem):
     
     def _position_control_buttons(self):
         """Position control buttons relative to furniture item."""
-        if not self.scene():
+        if not self.scene() or not self.buttons_visible:
+            return
+            
+        if not hasattr(self, 'delete_button') or not hasattr(self, 'rotate_button'):
             return
             
         button_size = 18
         margin = 2
         
-        # Delete button (top-right)
+        # Find existing button proxies
         delete_proxy = None
         rotate_proxy = None
         
-        # Find existing button proxies
         for item in self.scene().items():
             if hasattr(item, 'widget'):
-                if item.widget() == self.delete_button:
-                    delete_proxy = item
-                elif item.widget() == self.rotate_button:
-                    rotate_proxy = item
+                try:
+                    widget = item.widget()
+                    if widget == self.delete_button:
+                        delete_proxy = item
+                    elif widget == self.rotate_button:
+                        rotate_proxy = item
+                except RuntimeError:
+                    # Widget was deleted, skip
+                    continue
         
         # Create proxies if they don't exist
-        if not delete_proxy:
+        try:
+            if not delete_proxy:
+                delete_proxy = self.scene().addWidget(self.delete_button)
+            if not rotate_proxy:
+                rotate_proxy = self.scene().addWidget(self.rotate_button)
+        except RuntimeError:
+            # Buttons were deleted, recreate them
+            self._create_control_buttons()
             delete_proxy = self.scene().addWidget(self.delete_button)
-        if not rotate_proxy:
             rotate_proxy = self.scene().addWidget(self.rotate_button)
         
         # Position buttons
@@ -404,33 +427,87 @@ class FurnitureItem(QGraphicsRectItem):
         delete_proxy.setZValue(1000)
         rotate_proxy.setZValue(1000)
         
-        # Update visibility
-        delete_proxy.setVisible(self.buttons_visible)
-        rotate_proxy.setVisible(self.buttons_visible)
+        # Make sure buttons are visible
+        delete_proxy.setVisible(True)
+        rotate_proxy.setVisible(True)
+        
+        try:
+            self.delete_button.show()
+            self.rotate_button.show()
+        except RuntimeError:
+            # Buttons were deleted, ignore
+            pass
     
     def _show_control_buttons(self):
         """Show control buttons."""
         self.buttons_visible = True
-        # Recreate buttons to avoid artifacts
-        self._create_control_buttons()
+        # Always ensure buttons exist and are properly created
+        if not hasattr(self, 'delete_button') or not self.delete_button or \
+           not hasattr(self, 'rotate_button') or not self.rotate_button:
+            self._create_control_buttons()
         self._position_control_buttons()
     
     def _hide_control_buttons(self):
         """Hide control buttons."""
         self.buttons_visible = False
         if self.scene():
+            # Store items to remove to avoid modifying list while iterating
+            items_to_remove = []
             for item in self.scene().items():
                 if hasattr(item, 'widget'):
                     widget = item.widget()
-                    if widget == self.delete_button or widget == self.rotate_button:
-                        item.setVisible(False)
-                        # Remove from scene to prevent artifacts
-                        self.scene().removeItem(item)
+                    if (hasattr(self, 'delete_button') and widget == self.delete_button) or \
+                       (hasattr(self, 'rotate_button') and widget == self.rotate_button):
+                        items_to_remove.append(item)
+            
+            # Remove all button proxy items
+            for item in items_to_remove:
+                try:
+                    item.setVisible(False)
+                    self.scene().removeItem(item)
+                except RuntimeError:
+                    # Widget already deleted, ignore
+                    pass
+            
+            # Clear button references so they'll be recreated when needed
+            if items_to_remove:
+                self.delete_button = None
+                self.rotate_button = None
+                
+        # Also hide the actual button widgets safely
+        try:
+            if hasattr(self, 'delete_button') and self.delete_button:
+                self.delete_button.hide()
+        except RuntimeError:
+            # Widget already deleted, ignore
+            pass
+            
+        try:
+            if hasattr(self, 'rotate_button') and self.rotate_button:
+                self.rotate_button.hide()
+        except RuntimeError:
+            # Widget already deleted, ignore
+            pass
 
     def delete_self(self):
         """Remove this furniture item."""
         # Hide control buttons first
         self._hide_control_buttons()
+        # Clean up button widgets completely
+        try:
+            if hasattr(self, 'delete_button') and self.delete_button:
+                self.delete_button.deleteLater()
+                self.delete_button = None
+        except RuntimeError:
+            pass
+            
+        try:
+            if hasattr(self, 'rotate_button') and self.rotate_button:
+                self.rotate_button.deleteLater()
+                self.rotate_button = None
+        except RuntimeError:
+            pass
+            
         # Remove from parent's tracking
         self.parent_planner.remove_furniture_item(self)
     
@@ -475,6 +552,9 @@ class FurnitureItem(QGraphicsRectItem):
         """Hide buttons when mouse leaves (unless selected)."""
         if not self.isSelected():
             self._hide_control_buttons()
+            # Force a scene update to ensure buttons are removed
+            if self.scene():
+                self.scene().update()
         super().hoverLeaveEvent(event)
 
     def itemChange(self, change, value):
@@ -503,9 +583,9 @@ class FurnitureItem(QGraphicsRectItem):
             self._position_control_buttons()
         elif change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
             # Show/hide buttons based on selection
-            if self.isSelected():
+            if value:  # Item is being selected
                 self._show_control_buttons()
-            else:
+            else:  # Item is being deselected
                 self._hide_control_buttons()
                         
         return super().itemChange(change, value)
